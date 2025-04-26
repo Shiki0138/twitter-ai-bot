@@ -1,0 +1,29 @@
+name: Post Tweet
+
+on:
+  schedule:          # 自動投稿
+    - cron: '0 23 * * *'   # JST 08:00
+    - cron: '0 4  * * *'   # JST 13:00
+    - cron: '0 9  * * *'   # JST 18:00
+  workflow_dispatch:       # 「Run workflow」ボタン
+
+jobs:
+  tweet:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r requirements.txt
+
+      - run: python bot.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          API_KEY:        ${{ secrets.API_KEY }}
+          API_SECRET:     ${{ secrets.API_SECRET }}
+          ACCESS_TOKEN:   ${{ secrets.ACCESS_TOKEN }}
+          ACCESS_SECRET:  ${{ secrets.ACCESS_SECRET }}
