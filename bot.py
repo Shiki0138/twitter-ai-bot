@@ -1,3 +1,5 @@
+import os
+print("OPENAI key length:", len(os.getenv("OPENAI_API_KEY") or "0"))
 import os, random, tweepy, openai
 from datetime import datetime
 from dotenv import load_dotenv
