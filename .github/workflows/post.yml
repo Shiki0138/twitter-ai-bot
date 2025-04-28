@@ -28,5 +28,11 @@ jobs:
           ACCESS_TOKEN:   ${{ secrets.ACCESS_TOKEN }}
           ACCESS_SECRET:  ${{ secrets.ACCESS_SECRET }}
 
-              - name: debug OPENAI key length
+    - name: debug OPENAI key length
+      run: |
+        echo "::add-mask::$OPENAI_API_KEY"
+        echo "length=${#OPENAI_API_KEY}"
+        printf '%q\n' "$OPENAI_API_KEY"   # 制御文字を可視化
+      env:
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
    
