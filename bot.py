@@ -2,7 +2,8 @@ import os, random, tweepy, openai
 from datetime import datetime
 from dotenv import load_dotenv
 
-load_dotenv()
+from dotenv import load_dotenv
+load_dotenv(override=False)
 
 OPENAI_KEY   = os.getenv("OPENAI_API_KEY")
 API_KEY      = os.getenv("API_KEY")
