@@ -1,115 +1,78 @@
-# bot.py — ChatGPTだけでローカルビジネス向けスレッドを自動投稿
+# bot.py — ChatGPTだけでローカルビジネス向けスレッドを自動投稿（UTF-8安全版）
 # ============================================================
-# 概要
-#   • ChatGPT (openai>=1.3.0) にプロンプトを送り、Tweet1: / Tweet2: 形式で
-#     1スレッド(2〜3ツイート) を生成。
-#   • 先頭ツイートを投稿し、その tweet_id にセルフリプライして続ける。
-#   • 同一日のネタ被りを避けるためタイトルを簡易ハッシュしてログ保存。
-#   • GitHub Actions で 1 日 5 回実行すれば月間 150 スレッド＝約 450 ツイート。
-# ------------------------------------------------------------
-# 必要ライブラリ   : openai>=1.3.0, tweepy>=4.14.0, python-dotenv>=1.0.1
-# 環境変数 (Secrets): OPENAI_API_KEY, API_KEY, API_SECRET,
-#                     ACCESS_TOKEN, ACCESS_SECRET
-# ------------------------------------------------------------
+# * GitHub Actions で 1 日 5 回実行 → 月間 150 スレッド ≈ 450 ツイート
+# * ChatGPT から "Tweet1:" "Tweet2:" … を生成して投稿
+# * サロゲート残りで "utf-8 codec can't encode" が出ないよう、
+#   すべてのテキストを UTF-8 セーフにクレンジングしてから print / 投稿
+# -------------------------------------------------------------
+# requirements.txt
+#   openai>=1.3.0
+#   tweepy>=4.14.0
+#   python-dotenv>=1.0.1
+# -------------------------------------------------------------
 
-import os, re, random, csv, pathlib, openai, tweepy
-from datetime import datetime
+import os, re, random, hashlib, datetime, openai, tweepy
+from pathlib import Path
 from dotenv import load_dotenv
 
-# ── 0. 環境読み込み ─────────────────────────────────────────
+# ── 0. 環境変数 ─────────────────────────────────────
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
-
 API_KEY        = os.getenv("API_KEY")
 API_SECRET     = os.getenv("API_SECRET")
 ACCESS_TOKEN   = os.getenv("ACCESS_TOKEN")
 ACCESS_SECRET  = os.getenv("ACCESS_SECRET")
 
-# ── 1. 投稿テンプレート ───────────────────────────────────
+# ── 1. UTF‑8 セーフにするユーティリティ ───────────────
+
+def clean_utf8(text: str) -> str:
+    """サロゲート片割れ・制御文字を除去し、UTF‑8 で確実に出力できる形に"""
+    text = ''.join(ch for ch in text if not 0xD800 <= ord(ch) <= 0xDFFF)
+    return text.encode('utf-8', 'ignore').decode('utf-8', 'ignore')
+
+# ── 2. プロンプトテンプレート ───────────────────────
 TEMPLATES = [
-    "質問フック型: まだ◯◯に時間を浪費していませんか？→",
-    "驚き事例型: ChatGPTで△△が30秒!?→",
-    "課題解決ステップ型: 顧客対応ストレスを3STEPで削減→",
-    "ストーリー共感型: 昨日こんな相談を受けました→"
+    """あなたはSNSマーケのプロです。ローカルビジネス経営者やフリーランスに向け、ChatGPT活用ネタをXで紹介します。必ず以下形式で出力してください：\nTweet1: 読者の興味を引く導入文（80〜100字）\nTweet2: ChatGPT活用テクニックの本編（120字以内）\nTweet3: 行動を促す締め（質問・CTAを含む、80字以内）""",
+    """あなたは生成AIエバンジェリスト。中小事業主が「試したくなる」ChatGPTワザを教えてください。形式は：\nTweet1: つかみ 90字以内\nTweet2: 具体ステップ 箇条書きOK 120字以内\nTweet3: 締め 80字以内""",
 ]
 
-PROMPT_CORE = (
-    "あなたはSNSマーケティングのプロです。ローカルビジネス経営者・フリーランスが\n"
-    "\uD83D\uDE4C『え! 面白そう、やってみたい』と思うChatGPT活用法を紹介します。\n"
-    "必ず下記フォーマットで出力してください。\n\n"
-    "Tweet1: 導入(120字程度)\n"
-    "Tweet2: アイデア詳細(改行込み140字以内)\n"
-    "Tweet3: 行動呼びかけ(任意・120字以内)\n"
-    "— 注意 —\n"
-    "* それぞれ140字以内、日本語、自然な改行(空行2回も可)。\n"
-    "* ダブルクォーテーション \"\" は使わない。\n"
-    "* 専門用語は噛み砕いて。\n"
-    "* ChatGPT以外のツール名は出さない。\n"
-)
+REGEX_SPLIT = re.compile(r"Tweet\d+:\s*(.+)", re.I)
 
-# ── 2. GPT呼び出し & 分割 ────────────────────────────────
+# ── 3. ChatGPT からスレッド生成 ───────────────────
 
-def build_prompt() -> str:
-    return PROMPT_CORE + "\n導入テンプレート例: " + random.choice(TEMPLATES)
-
-
-def call_gpt(prompt: str) -> str:
+def generate_thread() -> list[str]:
+    prompt = random.choice(TEMPLATES)
     rsp = openai.chat.completions.create(
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=350,
+        max_tokens=250,
         temperature=0.9,
-        frequency_penalty=0.4,
     )
-    return rsp.choices[0].message.content.strip()
+    raw = rsp.choices[0].message.content.strip()
+    parts = [m.strip() for m in REGEX_SPLIT.findall(raw)]
+    if len(parts) < 2:  # フォールバック：改行で分断
+        parts = [p.strip() for p in raw.split("\n") if p.strip()]
+    if len(parts) == 1:  # 1本しかなければ強制2分割
+        text = parts[0]
+        midpoint = len(text) // 2
+        parts = [text[:midpoint], text[midpoint:]]
+    # 280字カット & UTF8 セーフ
+    parts = [clean_utf8(p)[:280] + ("…" if len(p) > 280 else "") for p in parts]
+    return parts
+
+# ── 4. 同日重複チェック ───────────────────────────
+LOG_PATH = Path(f"tweet_log_{datetime.date.today():%Y%m%d}.txt")
+LOG_PATH.touch(exist_ok=True)
 
 
-def split_tweets(text: str) -> list[str]:
-    """Tweet1:〜 の書式を抜き出し、なければfallbackとして空行2連で区切る"""
-    parts = re.findall(r"Tweet\d+:\s*(.+)", text, flags=re.I | re.S)
-    if not parts:
-        parts = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    if len(parts) == 1:  # 保険: 1本しか無いなら 50/50 で分割
-        half = len(parts[0]) // 2
-        parts = [parts[0][:half], parts[0][half:]]
-    trimmed = []
-    for p in parts:
-        p = p.replace("\r", "").strip()
-        if len(p) > 280:
-            p = p[:277] + "…"
-        trimmed.append(p)
-    return trimmed[:3]  # Max 3本
+def already_posted(signature: str) -> bool:
+    return signature in LOG_PATH.read_text().splitlines()
 
-# ── 3. 重複チェック用ログ ───────────────────────────────
-LOG_DIR = pathlib.Path("tweet_logs")
-LOG_DIR.mkdir(exist_ok=True)
+def mark_posted(signature: str):
+    with LOG_PATH.open("a", encoding="utf-8", errors="ignore") as f:
+        f.write(signature + "\n")
 
-
-def posted_today(headline: str) -> bool:
-    log = LOG_DIR / f"{datetime.now():%Y%m%d}.csv"
-    if not log.exists():
-        return False
-    with log.open() as f:
-        return any(headline[:50] == row[0] for row in csv.reader(f))
-
-
-def append_log(headline: str):
-    log = LOG_DIR / f"{datetime.now():%Y%m%d}.csv"
-    with log.open("a", newline="") as f:
-        csv.writer(f).writerow([headline[:50], datetime.now().isoformat()])
-
-# ── 4. スレッド生成 ──────────────────────────────────────
-
-def generate_thread() -> list[str]:
-    for _ in range(4):  # 4回までリトライ
-        prompt = build_prompt()
-        output = call_gpt(prompt)
-        parts = split_tweets(output)
-        if len(parts) >= 2 and not posted_today(parts[0]):
-            return parts
-    raise ValueError("生成ツイートが不足しました")
-
-# ── 5. 送信 ─────────────────────────────────────────────
+# ── 5. ツイート投稿 ───────────────────────────────
 
 def post_thread(parts: list[str]):
     client = tweepy.Client(
@@ -118,19 +81,28 @@ def post_thread(parts: list[str]):
         access_token=ACCESS_TOKEN,
         access_token_secret=ACCESS_SECRET,
     )
-    first = client.create_tweet(text=parts[0])
-    tweet_id = first.data["id"]
-    for p in parts[1:]:
-        resp = client.create_tweet(text=p, in_reply_to_tweet_id=tweet_id)
-        tweet_id = resp.data["id"]
-        time.sleep(1)  # API節度
-    append_log(parts[0])
-    print("Posted thread:", parts[0][:60])
+    first_id = None
+    for idx, text in enumerate(parts):
+        if idx == 0:
+            resp = client.create_tweet(text=text)
+            first_id = resp.data["id"]
+            print("Tweeted:", clean_utf8(text))
+            time.sleep(2)
+        else:
+            resp = client.create_tweet(text=text, in_reply_to_tweet_id=first_id)
+            print("Reply:", clean_utf8(text))
+            time.sleep(2)
 
-# ── 6. メイン ───────────────────────────────────────────
+# ── 6. メイン処理 ─────────────────────────────────
+
+def main():
+    parts = generate_thread()
+    sig = hashlib.sha1(parts[0].encode()).hexdigest()[:10]
+    if already_posted(sig):
+        print("今日すでに同じネタを投稿済み。スキップ")
+        return
+    post_thread(parts)
+    mark_posted(sig)
+
 if __name__ == "__main__":
-    try:
-        thread = generate_thread()
-        post_thread(thread)
-    except Exception as e:
-        print("❌", e)
+    main()
