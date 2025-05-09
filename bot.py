@@ -72,56 +72,13 @@ def valid_first(t:str)->bool:
     return MIN_LEN<=len(t)<=MAX_LEN and RE_SURPRISE.search(t) and re.search(r"\d",t)
 
 # ── 生成 ───────────────────────────────────────────
-PROMPT_TMPL=("あなたはSNSマーケター兼リサーチャーです。"...
+PROMPT_TMPL = (
+    "あなたはSNSマーケター兼リサーチャーです。"
+    "以下の統計と事例を必ず引用して、ローカルビジネス向けChatGPT活用法を作成してください。\n"
+    "統計: {stat}\n"
+    "事例: {fact}\n"
+    "出力は必ず次の形式:\n"
+    "Tweet1: …\nTweet2: …\nTweet3: …（必要なら）\n"
+    "Tweet1は100–140字で1回改行を含み、数字と驚き語(!/驚/衝撃)を必ず入れる。\n"
+    "Tweet2/3は120–140字、ROIや行動促進を明確に。"
 )
-
-def generate_thread()->list[str]:
-    template=random.choice(TEMPLATES);
-    stat=random.choice(STAT_POOL);fact=random.choice(FACT_POOL)
-    prompt=PROMPT_TMPL.format(stat=stat,fact=fact,template=template)
-    for _ in range(5):
-        raw=_clean(openai.chat.completions.create(
-            model=MODEL,messages=[{"role":"user","content":prompt}],
-            max_tokens=MAX_TOKENS,temperature=TEMP,top_p=TOP_P).choices[0].message.content)
-        parts=_parse(raw)
-        if len(parts)<2:continue
-        parts[0]=_insert_break(parts[0]);
-        if valid_first(parts[0]):break
-    else:
-        raw=_clean(openai.chat.completions.create(model=MODEL,messages=[{"role":"user","content":prompt.replace("100–140","90–140")}],max_tokens=MAX_TOKENS,temperature=TEMP,top_p=TOP_P).choices[0].message.content)
-        parts=_parse(raw)
-    if not parts:raise RuntimeError("生成失敗")
-    if len(parts)==1:
-        txt=parts[0];cut=max(60,len(txt)//2);parts=[txt[:cut],txt[cut:]]
-    trimmed=[]
-    for p in parts[:3]:
-        p=re.sub(r"^Tweet\d+:\s*","",p)     # ★ ラベル削除 ★
-        p=p.strip()
-        if len(p)>MAX_LEN:p=p[:MAX_LEN-1]+"…"
-        trimmed.append(_clean(p))
-    return [t for t in trimmed if t]
-
-# ── 投稿 ────────────────────────────────────────────
-
-def post(parts:list[str]):
-    if len(parts)>=2 and len(parts[0])<THRESH:
-        single=parts[0]+"\n\n"+"\n\n".join(parts[1:])
-        single=single[:279]+("…" if len(single)>279 else "")
-        client.create_tweet(text=single);print("Tweeted(single):",single[:60],"…");return
-    head=client.create_tweet(text=parts[0]).data["id"];print("Tweeted:",parts[0])
-    prev=head
-    for b in parts[1:]:
-        time.sleep(2);prev=client.create_tweet(text=b,in_reply_to_tweet_id=prev).data["id"]
-        print(" replied:",b[:40],"…")
-
-# ── main ───────────────────────────────────────────
-
-def main():
-    parts=generate_thread()
-    if is_duplicate(parts[0]):print("Duplicate. skip");return
-    try:post(parts)
-    except Exception as e:
-        print("⚠️",e);client.create_tweet(text=parts[0][:MAX_LEN])
-
-if __name__=="__main__":
-    main()
