@@ -1,98 +1,125 @@
-# bot.py — ChatGPT だけでローカルビジネス向けTipsを1スレッド（2ツイート）投稿
-# ──────────────────────────────────────────
-# 1 日に 5 回このスクリプトを呼び出すと、合計 10 ツイートになります。
-# GitHub Actions の cron を 5 本並べて実現してください。
+# bot.py — ChatGPTだけでローカルビジネス向けスレッドを自動投稿
 # -------------------------------------------------------------
-# requirements.txt
-#   openai>=1.3.0
-#   tweepy>=4.14.0
-#   python-dotenv>=1.0.1
+# ▸ 機能
+#   1. ChatGPTに“Tweet1: …\nTweet2: …(\nTweet3: …)”形式で生成させる
+#   2. 1ツイート280字を超えたら自動でカット（末尾に … を付与）
+#   3. 先頭ツイートを投稿 → 戻り値tweet_idを取得 → 返信で2本目以降を投稿
+#   4. 投稿後にタイトル行をログファイルに残し、重複を簡易チェック（同日内のみ）
+#
+# ▸ 使い方
+#   GitHub Actions などで 1 日 5 回このスクリプトを実行 ⇒ 合計 10〜15ツイート
+#   （cron は 0 0,4,8,12,16 * * * など UTCベースで設定）
 # -------------------------------------------------------------
 
-import os, random, openai, tweepy
+import os, random, re, hashlib, csv, pathlib, openai, tweepy
 from datetime import datetime
+from textwrap import shorten
 from dotenv import load_dotenv
 
-# ── 0. 環境変数 ───────────────────────────────
+# ── 環境変数 ───────────────────────────────────────────
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
-TW_CONSUMER_KEY    = os.getenv("API_KEY")
-TW_CONSUMER_SECRET = os.getenv("API_SECRET")
-TW_ACCESS_TOKEN    = os.getenv("ACCESS_TOKEN")
-TW_ACCESS_SECRET   = os.getenv("ACCESS_SECRET")
+API_KEY        = os.getenv("API_KEY")
+API_SECRET     = os.getenv("API_SECRET")
+ACCESS_TOKEN   = os.getenv("ACCESS_TOKEN")
+ACCESS_SECRET  = os.getenv("ACCESS_SECRET")
 
-# ── 1. ネタ候補 ───────────────────────────────
-TOPICS = [
-    "美容室の空き枠を埋める予約リマインド",
-    "口コミ倍増アイデア",
-    "Google ビジネスプロフィールのGEO最適化",
-    "生成AIで作る時短マニュアル",
-    "ChatGPTおもしろ便利活用法"
+# ── 設定 ───────────────────────────────────────────────
+LOG_PATH = pathlib.Path("tweet_log.csv")
+LOG_PATH.touch(exist_ok=True)
+
+TEMPLATES = [
+    "質問フック型", "事例インパクト型", "課題→手順型", "ミニストーリー型"
+]
+TARGETS = [
+    "美容室", "歯科医院", "士業(税理士や社労士)", "コーヒーショップ",
+    "ヨガインストラクター", "学習塾", "写真スタジオ"
 ]
 
-# ── 2. ChatGPT で 2 ツイート生成 ─────────────
+# ── 生成プロンプト作成 ───────────────────────────────
+PROMPT_BASE = (
+    "あなたはSNSマーケコンサルタントです。対象はローカルビジネス経営者やフリーランス。\n"
+    "ChatGPTの便利ワザをわかりやすく紹介するスレッドを作ります。\n"
+    "■条件\n"
+    "- 日本語、カジュアル丁寧、絵文字は多用しない\n"
+    "- Tweet1 は興味を引く導入、Tweet2 以降で具体テクニックを1つ解説\n"
+    "- 140字以内/ツイート、改行は2回まで可、引用符やJSONは使わない\n"
+    "- 最後のツイートで行動を促す\n"
+    "- 3ツイート目は必要なときのみ"
+)
 
-def make_thread() -> tuple[str, str]:
-    """(tweet_1, tweet_2) を返す。各 140 字以内。"""
+# ── 重複チェック（同日）────────────────────────────
 
-    topic = random.choice(TOPICS)
+def is_today_duplicate(title_line: str) -> bool:
+    today = datetime.now().strftime("%Y-%m-%d")
+    with LOG_PATH.open() as f:
+        return any(row and row[0] == today and row[1] == title_line for row in csv.reader(f))
 
-    system_msg = {
-        "role": "system",
-        "content": (
-            "あなたは日本のローカルビジネス（美容室・歯科など）のSNSコンサルタントです。"
-            "140字以内のツイートを自然な日本語で書きます。改行は日本人がよく使う\n\nを適宜入れます。"
-        )
-    }
 
-    user_msg = {
-        "role": "user",
-        "content": (
-            f"テーマ: {topic}\n\n"
-            "以下の条件で2ツイート生成してください。\n"
-            "- 1つ目: 興味を引く前振り。最後を『▼詳細はリプ欄』で終える。120字程度。\n"
-            "- 2つ目: 具体的手順やコツを3個、箇条書き(・)で。各行の間を空行で区切る。\n"
-            "- JSON や引用符 (\"\") は使わない。"
-        )
-    }
+def log_title(title_line: str):
+    today = datetime.now().strftime("%Y-%m-%d")
+    with LOG_PATH.open("a", newline="") as f:
+        csv.writer(f).writerow([today, title_line])
+
+# ── ChatGPTからスレッド生成 ───────────────────────────
+
+def generate_thread() -> list[str]:
+    template = random.choice(TEMPLATES)
+    target   = random.choice(TARGETS)
+    title    = f"{template}:{target}"
+
+    if is_today_duplicate(title):
+        # 乱数で再生成
+        return generate_thread()
+
+    prompt = (
+        PROMPT_BASE +
+        f"\n\n■今回のテンプレート: {template}\n■対象業種: {target}\n"
+    )
 
     rsp = openai.chat.completions.create(
         model="gpt-3.5-turbo",
-        messages=[system_msg, user_msg],
+        messages=[{"role": "user", "content": prompt}],
         max_tokens=220,
-        temperature=0.85,
-        frequency_penalty=0.3,
+        temperature=0.9,
+        frequency_penalty=0.4,
     )
 
-    content = rsp.choices[0].message.content.strip()
-    if "###" in content:
-        first, second = map(lambda x: x.strip()[:140], content.split("###", 1))
-    else:
-        # フォーマット崩れ対策：最初の空行で分割
-        parts = [p.strip() for p in content.split("\n\n") if p.strip()]
-        first, second = parts[0][:140], "\n\n".join(parts[1:])[:140]
+    raw = rsp.choices[0].message.content.strip()
+    tweets = []
+    for line in raw.split("\n"):
+        if line.startswith("Tweet"):
+            txt = re.sub(r"^Tweet\d+:\s*", "", line).strip()
+            if txt:
+                tweets.append(shorten(txt, width=279, placeholder="…"))
+    if len(tweets) < 2:
+        raise ValueError("生成ツイートが不足しました")
 
-    return first, second
+    log_title(title)
+    return tweets
 
-# ── 3. Twitter へ投稿 ────────────────────────
+# ── 投稿処理 ──────────────────────────────────────────
 
-def post_thread(tweet1: str, tweet2: str):
+def post_thread(tweets: list[str]):
     client = tweepy.Client(
-        consumer_key=TW_CONSUMER_KEY,
-        consumer_secret=TW_CONSUMER_SECRET,
-        access_token=TW_ACCESS_TOKEN,
-        access_token_secret=TW_ACCESS_SECRET,
+        consumer_key=API_KEY,
+        consumer_secret=API_SECRET,
+        access_token=ACCESS_TOKEN,
+        access_token_secret=ACCESS_SECRET,
     )
 
-    first = client.create_tweet(text=tweet1)
-    first_id = first.data.get("id")
+    # 1ツイート目
+    first = client.create_tweet(text=tweets[0])
+    reply_to = first.data.get("id")
 
-    client.create_tweet(text=tweet2, in_reply_to_tweet_id=first_id)
-    print(f"[{datetime.now():%Y-%m-%d %H:%M}] 投稿完了 → {first_id}")
+    # 2ツイート目以降
+    for txt in tweets[1:]:
+        res = client.create_tweet(text=txt, in_reply_to_tweet_id=reply_to)
+        reply_to = res.data.get("id")
 
-# ── 4. メイン ───────────────────────────────
+    print(f"{len(tweets)} tweets posted at", datetime.now())
+
+# ── メイン ──────────────────────────────────────────
 if __name__ == "__main__":
-    t1, t2 = make_thread()
-    print("------ tweet #1 ------\n" + t1)
-    print("------ tweet #2 ------\n" + t2)
-    post_thread(t1, t2)
+    thread = generate_thread()
+    post_thread(thread)
