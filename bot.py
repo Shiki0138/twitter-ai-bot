@@ -1,98 +1,98 @@
-# bot.py — ChatGPT だけで 1 日 5 スレッド（計 10 ツイート）投稿
+# bot.py — ChatGPT だけでローカルビジネス向けTipsを1スレッド（2ツイート）投稿
+# ──────────────────────────────────────────
+# 1 日に 5 回このスクリプトを呼び出すと、合計 10 ツイートになります。
+# GitHub Actions の cron を 5 本並べて実現してください。
 # -------------------------------------------------------------
-# 必要ライブラリ（requirements.txt に書く）：
+# requirements.txt
 #   openai>=1.3.0
 #   tweepy>=4.14.0
 #   python-dotenv>=1.0.1
 # -------------------------------------------------------------
 
-import os, json, random, time, openai, tweepy
+import os, random, openai, tweepy
 from datetime import datetime
 from dotenv import load_dotenv
 
-# ── 0. 環境変数読み込み ───────────────────────────────
+# ── 0. 環境変数 ───────────────────────────────
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
+TW_CONSUMER_KEY    = os.getenv("API_KEY")
+TW_CONSUMER_SECRET = os.getenv("API_SECRET")
+TW_ACCESS_TOKEN    = os.getenv("ACCESS_TOKEN")
+TW_ACCESS_SECRET   = os.getenv("ACCESS_SECRET")
 
-API_KEY        = os.getenv("API_KEY")
-API_SECRET     = os.getenv("API_SECRET")
-ACCESS_TOKEN   = os.getenv("ACCESS_TOKEN")
-ACCESS_SECRET  = os.getenv("ACCESS_SECRET")
-
-if not all([openai.api_key, API_KEY, API_SECRET, ACCESS_TOKEN, ACCESS_SECRET]):
-    raise RuntimeError("環境変数が不足しています .env を確認してください")
-
-# ── 1. 投稿テーマ候補（必要に応じて増やす） ─────────────
+# ── 1. ネタ候補 ───────────────────────────────
 TOPICS = [
-    "美容室のSNSネタ自動生成",
-    "予約リマインドの自動作成",
-    "朝礼ネタのクイズ化",
-    "アンケート自動分析",
-    "ChatGPT便利ネタ",
+    "美容室の空き枠を埋める予約リマインド",
+    "口コミ倍増アイデア",
+    "Google ビジネスプロフィールのGEO最適化",
+    "生成AIで作る時短マニュアル",
+    "ChatGPTおもしろ便利活用法"
 ]
 
-# ── 2. GPT へ渡す共通プロンプト ────────────────────
-SYSTEM_PROMPT = (
-    "あなたは地方の美容室や歯科医院などローカルビジネスの\n"
-    "経営者向けSNSライターです。\n"
-    "驚きと実用性を両立した生成AI(ChatGPT)活用テクニックを\n"
-    "日本語140字以内で 2 本のツイート(スレッド)にまとめます。\n"
-    "1本目: 興味を引く導入。\n"
-    "2本目: 具体的手順を5行程度で。\n"
-    "共通のルール:\n"
-    "・句読点を含め140文字以内\n"
-    "・『▼詳細はリプ欄』などのCTAは入れない\n"
-    "・絵文字は使用しない\n"
-    "JSON 形式 {\"first\": .., \"second\": ..} だけを出力してください。"
-)
+# ── 2. ChatGPT で 2 ツイート生成 ─────────────
 
-# ── 3. GPT から 2 本のツイート文を取得 ───────────────
+def make_thread() -> tuple[str, str]:
+    """(tweet_1, tweet_2) を返す。各 140 字以内。"""
 
-def generate_thread(topic: str) -> tuple[str, str]:
-    """ChatGPT で (first, second) 2 つのツイートを生成"""
-    user_prompt = f"トピック: {topic}"
+    topic = random.choice(TOPICS)
+
+    system_msg = {
+        "role": "system",
+        "content": (
+            "あなたは日本のローカルビジネス（美容室・歯科など）のSNSコンサルタントです。"
+            "140字以内のツイートを自然な日本語で書きます。改行は日本人がよく使う\n\nを適宜入れます。"
+        )
+    }
+
+    user_msg = {
+        "role": "user",
+        "content": (
+            f"テーマ: {topic}\n\n"
+            "以下の条件で2ツイート生成してください。\n"
+            "- 1つ目: 興味を引く前振り。最後を『▼詳細はリプ欄』で終える。120字程度。\n"
+            "- 2つ目: 具体的手順やコツを3個、箇条書き(・)で。各行の間を空行で区切る。\n"
+            "- JSON や引用符 (\"\") は使わない。"
+        )
+    }
+
     rsp = openai.chat.completions.create(
         model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=200,
-        temperature=0.9,
+        messages=[system_msg, user_msg],
+        max_tokens=220,
+        temperature=0.85,
+        frequency_penalty=0.3,
     )
+
     content = rsp.choices[0].message.content.strip()
-    try:
-        data = json.loads(content)
-        return data["first"], data["second"]
-    except Exception as e:
-        # 失敗時はプレーンテキストを分割して返す
-        parts = content.split("\n", 1)
-        return parts[0][:140], (parts[1] if len(parts) > 1 else "続きはコメントへ")[:140]
+    if "###" in content:
+        first, second = map(lambda x: x.strip()[:140], content.split("###", 1))
+    else:
+        # フォーマット崩れ対策：最初の空行で分割
+        parts = [p.strip() for p in content.split("\n\n") if p.strip()]
+        first, second = parts[0][:140], "\n\n".join(parts[1:])[:140]
 
-# ── 4. ツイート投稿 ─────────────────────────────
+    return first, second
 
-def post_thread(first: str, second: str):
+# ── 3. Twitter へ投稿 ────────────────────────
+
+def post_thread(tweet1: str, tweet2: str):
     client = tweepy.Client(
-        consumer_key=API_KEY,
-        consumer_secret=API_SECRET,
-        access_token=ACCESS_TOKEN,
-        access_token_secret=ACCESS_SECRET,
+        consumer_key=TW_CONSUMER_KEY,
+        consumer_secret=TW_CONSUMER_SECRET,
+        access_token=TW_ACCESS_TOKEN,
+        access_token_secret=TW_ACCESS_SECRET,
     )
-    # 1 本目
-    response = client.create_tweet(text=first)
-    tweet_id = response.data.get("id")
-    print("Tweeted 1/2 →", tweet_id)
-    # X API の write 制限対策で 3 秒待機
-    time.sleep(3)
-    # 2 本目（リプライ）
-    client.create_tweet(text=second, in_reply_to_tweet_id=tweet_id)
-    print("Tweeted 2/2 → reply to", tweet_id)
 
-# ── 5. main: 1 スレッドだけ投稿する ─────────────────
+    first = client.create_tweet(text=tweet1)
+    first_id = first.data.get("id")
+
+    client.create_tweet(text=tweet2, in_reply_to_tweet_id=first_id)
+    print(f"[{datetime.now():%Y-%m-%d %H:%M}] 投稿完了 → {first_id}")
+
+# ── 4. メイン ───────────────────────────────
 if __name__ == "__main__":
-    topic = random.choice(TOPICS)
-    print("▶ 選択トピック:", topic)
-    first, second = generate_thread(topic)
-    print("▶ 生成文\n1:", first, "\n2:", second)
-    post_thread(first, second)
-    print(f"[{datetime.now():%Y-%m-%d %H:%M}] 完了")
+    t1, t2 = make_thread()
+    print("------ tweet #1 ------\n" + t1)
+    print("------ tweet #2 ------\n" + t2)
+    post_thread(t1, t2)
