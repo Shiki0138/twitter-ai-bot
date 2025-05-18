@@ -1,5 +1,6 @@
 name: tweet-3times-a-day
 on:
+  workflow_dispatch:
   schedule:
     # UTC → JST(+9) で 00,08,16 時に相当
     - cron:  '0 15 * * *'   # 00:00 JST
