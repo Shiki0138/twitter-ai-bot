@@ -1,41 +1,25 @@
-name: Post Tweet
-
+name: tweet-3times-a-day
 on:
-  schedule:                # 自動投稿
-    - cron: '0 23 * * *'   # JST 08:00
-    - cron: '0  4 * * *'   # JST 13:00
-    - cron: '0  9 * * *'   # JST 18:00
-  workflow_dispatch:       # 「Run workflow」ボタン
-
+  schedule:
+    # UTC → JST(+9) で 00,08,16 時に相当
+    - cron:  '0 15 * * *'   # 00:00 JST
+    - cron:  '0 23 * * *'   # 08:00 JST
+    - cron:  '0 7  * * *'   # 16:00 JST
 jobs:
-  tweet:
+  run:
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      - name: Install deps
-        run: pip install -r requirements.txt
-
-      - name: Run bot
-        run: python bot.py
+      - run: pip install -r requirements.txt
+      - run: python bot.py
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           API_KEY:        ${{ secrets.API_KEY }}
           API_SECRET:     ${{ secrets.API_SECRET }}
           ACCESS_TOKEN:   ${{ secrets.ACCESS_TOKEN }}
           ACCESS_SECRET:  ${{ secrets.ACCESS_SECRET }}
-
-      # ───────── ここが追加したデバッグ ─────────
-      - name: Debug OPENAI key length
-        run: |
-          echo "::add-mask::$OPENAI_API_KEY"
-          echo "length=${#OPENAI_API_KEY}"
-          printf '%q\n' "$OPENAI_API_KEY"
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      # ────────────────────────────────────────
+          SHEET_URL:      ${{ secrets.SHEET_URL }}
+          GOOGLE_SERVICE_JSON: ${{ secrets.GOOGLE_SERVICE_JSON }}
