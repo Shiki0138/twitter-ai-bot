@@ -50,7 +50,6 @@ SYS_EXTRACT = (
 SYS_TWEET = (
     "美容師向けアカウントとしてツイートしてください。"
     "140文字以内に収まらない場合は<split>タグで分割し、"
-    "各文末に #美容師 #サロン経営 のいずれか1つを必ず付与してください。"
 )
 MODEL = "gpt-4o-mini"
 RE_SPLIT = re.compile(r"<split>")
