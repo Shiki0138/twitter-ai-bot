@@ -1,84 +1,127 @@
-# bot.py — ラベル除去版：Tweet1/Tweet2 表記を投稿前に完全削除
-# =====================================================================
-# (その他の仕様はそのまま)
-#   • ChatGPT からは Tweet1:/Tweet2: ラベル付きで受け取り
-#   • 投稿前に正規表現で "Tweet\d+:" を除去 → すっきり表示
-# ---------------------------------------------------------------------
+###############################################
+# bot.py — Sheets→GPT→X 自動投稿 1日3回版
+# (画像フォルダは完全に無視し、スプレッドシートのみ参照)
+###############################################
 
-import os, re, random, time, hashlib, datetime, unicodedata
-from pathlib import Path
+import os, re, json, datetime, textwrap
+from typing import List
 
-import openai, tweepy
+import tweepy, openai, gspread
+from google.oauth2.service_account import Credentials
 from dotenv import load_dotenv
 
-# ── 環境変数 ─────────────────────────────────────────
+# ── 環境変数 ────────────────────────────────
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 API_KEY        = os.getenv("API_KEY")
 API_SECRET     = os.getenv("API_SECRET")
 ACCESS_TOKEN   = os.getenv("ACCESS_TOKEN")
 ACCESS_SECRET  = os.getenv("ACCESS_SECRET")
+SHEET_URL      = os.getenv("SHEET_URL")              # 共有 URL
+SERVICE_JSON   = os.getenv("GOOGLE_SERVICE_JSON")    # JSON 文字列 or パス
 
+# ── Twitter クライアント ───────────────────
 client = tweepy.Client(
     consumer_key=API_KEY,
     consumer_secret=API_SECRET,
     access_token=ACCESS_TOKEN,
     access_token_secret=ACCESS_SECRET,
+    wait_on_rate_limit=True,
 )
 
-# ── ログ ────────────────────────────────────────────
-LOG_DIR = Path("tweet_logs"); LOG_DIR.mkdir(exist_ok=True)
+# ── Google Sheets クライアント ──────────────
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+if os.path.isfile(str(SERVICE_JSON)):
+    creds = Credentials.from_service_account_file(SERVICE_JSON, scopes=SCOPES)
+else:
+    creds = Credentials.from_service_account_info(json.loads(SERVICE_JSON), scopes=SCOPES)
 
-def _hash_today(txt:str)->str:
-    today = datetime.date.today().isoformat()
-    return hashlib.md5((today+txt).encode()).hexdigest()
+gc = gspread.authorize(creds)
+sheet = gc.open_by_url(SHEET_URL).sheet1
 
-def is_duplicate(txt:str)->bool:
-    h = _hash_today(txt)
-    f = LOG_DIR/f"{datetime.date.today():%Y%m%d}.log"
-    if f.exists() and h in f.read_text().split():
-        return True
-    f.write_text((f.read_text() if f.exists() else "")+h+"\n")
-    return False
-
-# ── データ ───────────────────────────────────────────
-TEMPLATES=["質問フック型","驚き事例型","課題解決ステップ型","ストーリー共感型"]
-STAT_POOL=["米国中小企業の83%がAIで業務効率化を実感（BPC調査）",...]
-FACT_POOL=["ロンドン美容室BleachはAI活用SNSで新規予約20%増",...]
-
-MODEL="gpt-4o-mini"; TEMP=1.2; TOP_P=1; MAX_TOKENS=350
-MIN_LEN,MAX_LEN,THRESH=100,140,110
-RE_SURPRISE=re.compile(r"[!！]|驚|衝撃")
-
-# ── util ───────────────────────────────────────────
-import unicodedata
-
-def _clean(t:str)->str:
-    t=unicodedata.normalize("NFC",t);return t.encode("utf-8","ignore").decode()
-
-def _insert_break(t:str,limit:int=120)->str:
-    t=t.strip();
-    if len(t)<=limit:return t
-    for m in "。.!?！？":
-        p=t.rfind(m,50,limit)
-        if p!=-1:return t[:p+1]+"\n"+t[p+1:]
-    return t[:limit]+"\n"+t[limit:]
-
-def _parse(raw:str)->list[str]:
-    pts=re.findall(r"Tweet\d+:\s*(.+)",raw,flags=re.I)
-    return pts or [p.strip() for p in raw.split("\n") if p.strip()]
-
-def valid_first(t:str)->bool:
-    return MIN_LEN<=len(t)<=MAX_LEN and RE_SURPRISE.search(t) and re.search(r"\d",t)
-
-# ── 生成 ───────────────────────────────────────────
-PROMPT_TMPL = (
-    "あなたはSNSマーケター兼リサーチャーです。"
-    "以下の統計と事例を必ず引用して、ローカルビジネス向けChatGPT活用法を作成してください。\n"
-    "統計: {stat}\n"
-    "事例: {fact}\n"
-    "出力は必ず次の形式:\n"
-    "Tweet1: …\nTweet2: …\nTweet3: …（必要なら）\n"
-    "Tweet1は100–140字で1回改行を含み、数字と驚き語(!/驚/衝撃)を必ず入れる。\n"
-    "Tweet2/3は120–140字、ROIや行動促進を明確に。"
+# ── GPT プロンプト ─────────────────────────
+SYS_EXTRACT = (
+    "あなたは美容室経営のコンサルタントです。\n"
+    "入力文章から美容師・サロンオーナーが役立てられる要点を1〜2文に要約してください。"
 )
+SYS_TWEET = (
+    "美容師向けアカウントとしてツイートしてください。"
+    "140文字以内に収まらない場合は<split>タグで分割し、"
+    "各文末に #美容師 #サロン経営 のいずれか1つを必ず付与してください。"
+)
+MODEL = "gpt-4o-mini"
+RE_SPLIT = re.compile(r"<split>")
+MAX_LEN = 140
+
+# ── GPT ヘルパー ─────────────────────────
+
+def extract_useful(raw: str) -> str:
+    res = openai.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": SYS_EXTRACT},
+            {"role": "user", "content": raw},
+        ],
+    )
+    return res.choices[0].message.content.strip()
+
+
+def make_tweets(useful: str) -> List[str]:
+    res = openai.chat.completions.create(
+        model=MODEL,
+        messages=[
+            {"role": "system", "content": SYS_TWEET},
+            {"role": "user", "content": useful},
+        ],
+    ).choices[0].message.content.strip()
+
+    parts = [p.strip() for p in RE_SPLIT.split(res) if p.strip()]
+
+    # 念のため 140 文字超過を強制分割
+    fixed: List[str] = []
+    for p in parts:
+        if len(p) <= MAX_LEN:
+            fixed.append(p)
+        else:
+            fixed.extend(textwrap.wrap(p, MAX_LEN - 1))
+    return fixed
+
+# ── Twitter 投稿 ───────────────────────────
+
+def post_thread(texts: List[str]) -> None:
+    root = client.create_tweet(text=texts[0])
+    reply_to = root.data["id"]
+    for t in texts[1:]:
+        tw = client.create_tweet(text=t, in_reply_to_tweet_id=reply_to)
+        reply_to = tw.data["id"]
+
+# ── メイン処理 ────────────────────────────
+
+def process_one_row() -> None:
+    rows = sheet.get_all_records()
+    for idx, row in enumerate(rows, start=2):  # データは2行目から
+        if not row.get("Posted"):
+            raw_text = row.get("抽出テキスト", "")
+            if not raw_text:
+                continue  # 空行スキップ
+            useful = row.get("UsefulInfo") or extract_useful(raw_text)
+            tweets = json.loads(row.get("TweetsJSON") or "[]") or make_tweets(useful)
+
+            post_thread(tweets)
+
+            sheet.batch_update([
+                {"range": f"D{idx}", "values": [[useful]]},
+                {"range": f"E{idx}", "values": [[json.dumps(tweets, ensure_ascii=False)]]},
+                {"range": f"F{idx}", "values": [[True]]},
+                {"range": f"G{idx}", "values": [[datetime.datetime.now().isoformat()]]},
+            ])
+            print(f"✅ Posted row {idx}")
+            return
+    print("🚫 No unposted rows found.")
+
+
+if __name__ == "__main__":
+    process_one_row()
