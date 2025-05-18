@@ -1,6 +1,6 @@
 ###############################################
 # bot.py — Sheets→GPT→X 自動投稿 1日3回版
-# テーマ限定 & 共感/驚きフック（2025‑05‑18 修正版）
+# テーマ限定 & 共感/驚きフック + 一人称つぶやきスタイル（営業感ゼロ）
 ###############################################
 
 import os, re, json, datetime, textwrap, random
@@ -54,18 +54,20 @@ THEME_REGEX = re.compile("|".join(re.escape(t) for t in THEMES))
 EMOJIS = ["🎯", "💡", "✨", "📈", "🚀"]
 
 # ── GPT プロンプト ─────────────────────────
+# ❶ 要点抽出
 SYS_EXTRACT = (
     "あなたは美容師・美容室オーナー専門のコンサルタント兼コピーライターです。\n"
     "入力文から、美容師が\"共感\"または\"驚き\"を感じる要点を1文に要約してください。"
 )
 
+# ❷ ツイート生成（営業感ゼロ・一人称気づき風）
 SYS_TWEET = (
-    "以下の要点をもとに、美容師向け X(Twitter) 投稿文を作成してください。\n"
+    "以下の要点を使って、\n"
     "◆ 1ツイート140文字以内。超える場合は<split>タグで分割。\n"
-    "◆ 1ツイート目は共感フックか驚き統計で始める。\n"
-    "◆ 絵文字は {emoji} を文中か末尾に1個だけ使う。\n"
-    "◆ ハッシュタグは一切付けない。\n"
-    "◆ 読んだ瞬間にシェアしたくなるように洞察・具体例を入れる。"
+    "◆ 一人称で“気づき”を共有する独り言トーン。読者に直接呼びかけたり、誘導・宣伝はしない。\n"
+    "◆ ツイート冒頭 or 文中に共感フックか、「定説の否定」など驚きを与えるメッセージを置く。\n"
+    "◆ 絵文字は {emoji} を1個だけ使用し、語尾ハッシュタグは付けない。\n"
+    "◆ シンプルで内省的、かつ具体的な洞察を含める。"
 )
 
 MODEL = "gpt-4o-mini"
@@ -122,11 +124,8 @@ def process_one_row() -> None:
         if row.get("Posted"):
             continue
         raw_text = row.get("抽出テキスト", "").strip()
-        if not raw_text:
+        if not raw_text or not THEME_REGEX.search(raw_text):
             continue
-        # テーマ判定（キーワード一致 & GPT 判定）
-        if not THEME_REGEX.search(raw_text):
-            continue  # テーマ外はスキップ
 
         useful = row.get("UsefulInfo") or extract_useful(raw_text)
         tweets = json.loads(row.get("TweetsJSON") or "[]") or make_tweets(useful)
