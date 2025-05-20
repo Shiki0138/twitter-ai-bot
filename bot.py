@@ -1,10 +1,10 @@
 ###############################################
 # bot.py — Sheets→GPT→X 自動投稿 1日3回版
-# テーマ限定 & 共感/驚きフック + 一人称つぶやきスタイル（営業感ゼロ）
+# 2025‑05‑18 : 高品質"気づきツイート"生成プロンプトを統合
 ###############################################
 
-import os, re, json, datetime, textwrap, random
-from typing import List
+import os, re, json, datetime, textwrap, random, math
+from typing import List, Dict, Any
 
 import tweepy, openai, gspread
 from google.oauth2.service_account import Credentials
@@ -13,14 +13,11 @@ from dotenv import load_dotenv
 # ── 環境変数 ────────────────────────────────
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
-API_KEY        = os.getenv("API_KEY")
-API_SECRET     = os.getenv("API_SECRET")
-ACCESS_TOKEN   = os.getenv("ACCESS_TOKEN")
-ACCESS_SECRET  = os.getenv("ACCESS_SECRET")
-SHEET_URL      = os.getenv("SHEET_URL")
-SERVICE_JSON   = os.getenv("GOOGLE_SERVICE_JSON")
+API_KEY, API_SECRET = os.getenv("API_KEY"), os.getenv("API_SECRET")
+ACCESS_TOKEN, ACCESS_SECRET = os.getenv("ACCESS_TOKEN"), os.getenv("ACCESS_SECRET")
+SHEET_URL = os.getenv("SHEET_URL")
+SERVICE_JSON = os.getenv("GOOGLE_SERVICE_JSON")
 
-# ── Twitter クライアント ───────────────────
 client = tweepy.Client(
     consumer_key=API_KEY,
     consumer_secret=API_SECRET,
@@ -29,11 +26,7 @@ client = tweepy.Client(
     wait_on_rate_limit=True,
 )
 
-# ── Google Sheets クライアント ──────────────
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 if os.path.isfile(str(SERVICE_JSON)):
     creds = Credentials.from_service_account_file(SERVICE_JSON, scopes=SCOPES)
 else:
@@ -52,95 +45,92 @@ THEMES = [
 ]
 THEME_REGEX = re.compile("|".join(re.escape(t) for t in THEMES))
 EMOJIS = ["🎯", "💡", "✨", "📈", "🚀"]
-
-# ── GPT プロンプト ─────────────────────────
-# ❶ 要点抽出
-SYS_EXTRACT = (
-    "あなたは美容師・美容室オーナー専門のコンサルタント兼コピーライターです。\n"
-    "入力文から、美容師が\"共感\"または\"驚き\"を感じる要点を1文に要約してください。"
-)
-
-# ❷ ツイート生成（営業感ゼロ・一人称気づき風）
-SYS_TWEET = (
-    "以下の要点を使って、\n"
-    "◆ 1ツイート140文字以内。超える場合は<split>タグで分割。\n"
-    "◆ 一人称で“気づき”を共有する独り言トーン。読者に直接呼びかけたり、誘導・宣伝はしない。\n"
-    "◆ ツイート冒頭 or 文中に共感フックか、「定説の否定」など驚きを与えるメッセージを置く。\n"
-    "◆ 絵文字は {emoji} を1個だけ使用し、語尾ハッシュタグは付けない。\n"
-    "◆ シンプルで内省的、かつ具体的な洞察を含める。"
-)
-
 MODEL = "gpt-4o-mini"
-RE_SPLIT = re.compile(r"<split>")
 MAX_LEN = 140
+
+# ── 新しい高品質ツイート生成プロンプト ─────────
+PROMPT_TEMPLATE = (
+    "あなたはローカルビジネス（美容室・整骨院・個人店など）のマーケティングを専門とするリサーチャー兼コピーライターです。\n\n"
+    "## Audience\n現場で集客・リピート対策を任されている経営者・店長\n\n"
+    "## Goal\n100〜140文字の日本語ツイートを {N} 本生成する。読んだ相手が『試してみよう』と思う一次情報（数値・調査結果）や顧客心理の“事実”を共有すること。\n\n"
+    "## Content Rules\n"
+    "1. **ファクト必須** 2022年以降の信頼できる公式データのみ。数値を最低1つ含める\n"
+    "2. **文字数** 全角換算100〜140。範囲外なら自動で調整\n"
+    "3. **書式** 一人称『私』視点の気づきメモ。絵文字・ハッシュタグ・セールス語禁止。ファクト末尾に簡潔出典 (◯◯調査2024) を括弧書き\n"
+    "4. **ジャンル比率** マーケ戦術40％ / 顧客心理40％ / デジタル効率化20％\n"
+    "5. **重複禁止** テーマ・数字・出典が被らない\n"
+    "6. **品質チェック** 条件外は自動再生成\n\n"
+    "## Output Format\nJSON 配列で\n````json\n[
+  {\"tweet\": \"ここに100〜140文字の投稿文\", \"source\": \"出典URLまたはDOI\"}
+]\n````"
+)
+
+RE_JSON_ARRAY = re.compile(r"\[.*\]", re.S)
 
 # ── GPT ヘルパー ─────────────────────────
 
-def extract_useful(raw: str) -> str:
+def generate_tweet(raw: str) -> List[str]:
+    """1 つの OCR 原文から 1 本の高品質ツイートを返す"""
+    # まず PROMPT_TEMPLATE で N=1 本要求
+    prompt = PROMPT_TEMPLATE.format(N=1)
+    payload = f"原文:\n{raw}"
     res = openai.chat.completions.create(
         model=MODEL,
-        messages=[
-            {"role": "system", "content": SYS_EXTRACT},
-            {"role": "user", "content": raw},
-        ],
-    )
-    return res.choices[0].message.content.strip()
-
-
-def make_tweets(useful: str) -> List[str]:
-    prompt = SYS_TWEET.format(emoji=random.choice(EMOJIS))
-    res = openai.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": useful},
-        ],
+        messages=[{"role": "user", "content": prompt}, {"role": "user", "content": payload}],
+        temperature=0.9,
     ).choices[0].message.content.strip()
 
-    parts = [p.strip() for p in RE_SPLIT.split(res) if p.strip()]
+    json_match = RE_JSON_ARRAY.search(res)
+    if not json_match:
+        raise ValueError("GPT output is not valid JSON array")
+    data = json.loads(json_match.group(0))
+    tweet_text = data[0]["tweet"]
+    # 強制 140 字以内調整
+    if len(tweet_text) > MAX_LEN:
+        tweet_text = tweet_text[:MAX_LEN]
+    return [tweet_text]
 
-    fixed: List[str] = []
-    for p in parts:
-        if len(p) <= MAX_LEN:
-            fixed.append(p)
-        else:
-            fixed.extend(textwrap.wrap(p, MAX_LEN - 1))
-    return fixed
+# ── Twitter 投稿 & シート更新 ───────────────
 
-# ── Twitter 投稿 ───────────────────────────
-
-def post_thread(texts: List[str]) -> None:
-    root = client.create_tweet(text=texts[0])
+def post_and_update(idx: int, tweet_list: List[str]):
+    root = client.create_tweet(text=tweet_list[0])
     reply_to = root.data["id"]
-    for t in texts[1:]:
+    for t in tweet_list[1:]:
         tw = client.create_tweet(text=t, in_reply_to_tweet_id=reply_to)
         reply_to = tw.data["id"]
 
+    sheet.batch_update([
+        {"range": f"F{idx}", "values": [[True]]},
+        {"range": f"G{idx}", "values": [[datetime.datetime.now().isoformat()]]},
+    ])
+
 # ── メイン処理 ────────────────────────────
 
-def process_one_row() -> None:
+def process_one_row():
     rows = sheet.get_all_records()
+    fallback_idx: int | None = None
+
     for idx, row in enumerate(rows, start=2):
         if row.get("Posted"):
             continue
         raw_text = row.get("抽出テキスト", "").strip()
-        if not raw_text or not THEME_REGEX.search(raw_text):
+        if not raw_text:
             continue
+        if THEME_REGEX.search(raw_text):
+            tweets = generate_tweet(raw_text)
+            post_and_update(idx, tweets)
+            print(f"✅ Posted themed row {idx}")
+            return
+        if fallback_idx is None:
+            fallback_idx = idx
 
-        useful = row.get("UsefulInfo") or extract_useful(raw_text)
-        tweets = json.loads(row.get("TweetsJSON") or "[]") or make_tweets(useful)
-
-        post_thread(tweets)
-
-        sheet.batch_update([
-            {"range": f"D{idx}", "values": [[useful]]},
-            {"range": f"E{idx}", "values": [[json.dumps(tweets, ensure_ascii=False)]]},
-            {"range": f"F{idx}", "values": [[True]]},
-            {"range": f"G{idx}", "values": [[datetime.datetime.now().isoformat()]]},
-        ])
-        print(f"✅ Posted row {idx}")
-        return
-    print("🚫 No unposted rows found or no rows match themes.")
+    if fallback_idx:
+        raw_text = rows[fallback_idx - 2]["抽出テキスト"].strip()
+        tweets = generate_tweet(raw_text)
+        post_and_update(fallback_idx, tweets)
+        print(f"⚠️  Fallback posted row {fallback_idx}")
+    else:
+        print("🚫 No unposted rows available.")
 
 
 if __name__ == "__main__":
