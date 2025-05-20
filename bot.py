@@ -102,7 +102,7 @@ def process():
     for idx,row in enumerate(rows, start=2):
         if row.get("Posted"):
             continue
-        text = row.get("抽出テキスト","`).strip()
+        text = row.get("抽出テキスト","").strip()
         if not text:
             continue
         if THEME_REGEX.search(text):
