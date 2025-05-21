@@ -100,8 +100,7 @@ def gpt_tweet(raw: str, retries: int = 3) -> str:
     """OCR で抽出した文章 → 140 字以内のツイート 1 本を返す"""
     base_messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"原文:
-{raw}"},
+        {"role": "user", "content": f"原文:{raw}"},
     ]
     temperature = 0.7
     for _ in range(retries):
@@ -123,8 +122,6 @@ def gpt_tweet(raw: str, retries: int = 3) -> str:
             pass  # フォーマット不備 → 再試行
         temperature += 0.1  # 長すぎ or 失敗時は温度を少し上げて再生成
     raise RuntimeError("GPT failed to return a valid ≤140‑char tweet after retries")
-        temp += 0.1  # 長すぎた場合は温度を上げて再生成
-    raise RuntimeError("GPT failed to return <=140 chars")
 
 # ────────────────── Posting & Sheet ──────────
 
