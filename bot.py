@@ -3,7 +3,7 @@
 # bot.py — Sheets→GPT→X 自動投稿 1日3回版 (clean)
 ###############################################
 
-import os, re, json, datetime, random
+import os, re, json, datetime, random, time
 from typing import List
 
 import tweepy, openai, gspread
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 # ── 環境変数 ────────────────────────────────
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 API_KEY        = os.getenv("API_KEY")
 API_SECRET     = os.getenv("API_SECRET")
 ACCESS_TOKEN   = os.getenv("ACCESS_TOKEN")
@@ -72,19 +72,30 @@ RE_JSON_ARRAY = re.compile(r"\[.*?\]", re.S)
 
 # ── GPT helper ─────────────────────────────
 
-def generate_tweet(raw: str) -> List[str]:
+def generate_tweet(raw: str, retries: int = 3) -> List[str]:
+    """Generate a single tweet text from the given raw string."""
     prompt = PROMPT_TEMPLATE.format(N=1)
     messages = [
         {"role": "user", "content": prompt},
-        {"role": "user", "content": f"原文:\n{raw}"}
+        {"role": "user", "content": f"原文:\n{raw}"},
     ]
-    res = openai.chat.completions.create(model=MODEL, messages=messages, temperature=0.7)
-    content = res.choices[0].message.content
-    m = RE_JSON_ARRAY.search(content)
-    if not m:
-        raise ValueError("GPT output not JSON array")
-    tweet_text = json.loads(m.group(0))[0]["tweet"]
-    return [tweet_text[:MAX_LEN]]
+    for attempt in range(1, retries + 1):
+        try:
+            res = openai_client.chat.completions.create(
+                model=MODEL, messages=messages, temperature=0.7
+            )
+            content = res.choices[0].message.content
+            m = RE_JSON_ARRAY.search(content)
+            if not m:
+                raise ValueError("GPT output not JSON array")
+            tweet_text = json.loads(m.group(0))[0]["tweet"]
+            return [tweet_text[:MAX_LEN]]
+        except Exception as e:
+            if attempt == retries:
+                raise
+            # wait a bit before retrying
+            time.sleep(2 * attempt)
+    raise RuntimeError("generate_tweet failed after retries")
 
 # ── Posting & sheet update ─────────────────
 
