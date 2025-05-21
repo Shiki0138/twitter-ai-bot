@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 ###############################################
-# bot.py — Sheets→GPT→X 自動投稿 1日5回版 (robust JSON / function‑calling)
+# bot.py — Sheets→GPT→X 自動投稿 1日5回版 (robust JSON / function-calling)
 ###############################################
 """
 ● 変更点
@@ -97,23 +97,30 @@ FUNCTION_SCHEMA = {
 
 
 def gpt_tweet(raw: str, retries: int = 3) -> str:
+    prompt = SYSTEM_PROMPT
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": prompt},
         {"role": "user", "content": f"原文:\n{raw}"}
     ]
     temp = 0.7
     for _ in range(retries):
         resp = openai.chat.completions.create(
-    model=MODEL,
-    messages=messages,
-    tools=[{"type": "function", "function": FUNCTION_SCHEMA}],
-    tool_choice={"type": "function", "function": {"name": "make_tweet"}},
-    temperature=temp,
-)
-        item = resp.choices[0].message.tool_calls[0].function.arguments
-        tweet = item["tweet"]
-        if len(tweet) <= MAX_LEN:
-            return tweet
+            model=MODEL,
+            messages=messages,
+            tools=[{"type": "function", "function": FUNCTION_SCHEMA}],
+            tool_choice={"type": "function", "function": {"name": "make_tweet"}},
+            temperature=temp,
+        )
+        args_json = resp.choices[0].message.tool_calls[0].function.arguments
+        try:
+            data = json.loads(args_json)  # arguments は JSON 文字列
+            tweet = data["tweet"]
+            if len(tweet) <= MAX_LEN:
+                return tweet
+        except Exception:
+            pass  # 失敗したら再試行
+        temp += 0.1  # 温度少し上げて再生成
+    raise RuntimeError("GPT failed to return valid tweet <=140 chars")
         temp += 0.1  # 長すぎた場合は温度を上げて再生成
     raise RuntimeError("GPT failed to return <=140 chars")
 
