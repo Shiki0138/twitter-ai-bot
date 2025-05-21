@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 ###############################################
-# bot.py — Sheets→GPT→X 自動投稿 1日5回版 (robust JSON / function-calling)
+# bot.py — Sheets→GPT→X 自動投稿 1日5回版 (robust JSON / function‑calling)
 ###############################################
 """
 ● 変更点
@@ -97,30 +97,32 @@ FUNCTION_SCHEMA = {
 
 
 def gpt_tweet(raw: str, retries: int = 3) -> str:
-    prompt = SYSTEM_PROMPT
-    messages = [
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": f"原文:\n{raw}"}
+    """OCR で抽出した文章 → 140 字以内のツイート 1 本を返す"""
+    base_messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"原文:
+{raw}"},
     ]
-    temp = 0.7
+    temperature = 0.7
     for _ in range(retries):
         resp = openai.chat.completions.create(
             model=MODEL,
-            messages=messages,
+            messages=base_messages,
             tools=[{"type": "function", "function": FUNCTION_SCHEMA}],
             tool_choice={"type": "function", "function": {"name": "make_tweet"}},
-            temperature=temp,
+            temperature=temperature,
         )
-        args_json = resp.choices[0].message.tool_calls[0].function.arguments
+        # tool_calls[0].function.arguments は JSON 文字列
+        args_json: str = resp.choices[0].message.tool_calls[0].function.arguments
         try:
-            data = json.loads(args_json)  # arguments は JSON 文字列
-            tweet = data["tweet"]
+            data = json.loads(args_json)
+            tweet: str = data["tweet"]
             if len(tweet) <= MAX_LEN:
                 return tweet
-        except Exception:
-            pass  # 失敗したら再試行
-        temp += 0.1  # 温度少し上げて再生成
-    raise RuntimeError("GPT failed to return valid tweet <=140 chars")
+        except (json.JSONDecodeError, KeyError):
+            pass  # フォーマット不備 → 再試行
+        temperature += 0.1  # 長すぎ or 失敗時は温度を少し上げて再生成
+    raise RuntimeError("GPT failed to return a valid ≤140‑char tweet after retries")
         temp += 0.1  # 長すぎた場合は温度を上げて再生成
     raise RuntimeError("GPT failed to return <=140 chars")
 
