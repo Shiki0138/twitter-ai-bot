@@ -104,12 +104,12 @@ def gpt_tweet(raw: str, retries: int = 3) -> str:
     temp = 0.7
     for _ in range(retries):
         resp = openai.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=[{"type":"function","function": FUNCTION_SCHEMA}],
-            tool_choice={"type":"function","function":"make_tweet"},
-            temperature=temp,
-        )
+    model=MODEL,
+    messages=messages,
+    tools=[{"type": "function", "function": FUNCTION_SCHEMA}],
+    tool_choice={"type": "function", "function": {"name": "make_tweet"}},
+    temperature=temp,
+)
         item = resp.choices[0].message.tool_calls[0].function.arguments
         tweet = item["tweet"]
         if len(tweet) <= MAX_LEN:
